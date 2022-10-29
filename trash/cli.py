@@ -12,7 +12,6 @@ def main():
         force=args.force,
         interactive=args.interactive,
     )
-
     return trash.run(args.cmd, args.files)
 
 
@@ -21,10 +20,40 @@ def setup_cmd(subparser, name, aliases=[], parents=[]):
         name,
         parents=parents,
         help="",
+        description=get_description(name),
         aliases=aliases,
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=f"%(prog)s {__version__}",
     )
     cmd.set_defaults(cmd=name)
     return cmd
+
+
+def get_description(cmd):
+    return {
+        "list": (
+            "List files in the trash.\n"
+            "Files are relative to the trash, "
+            "if none are provided, all files in the trash are listed.",
+        ),
+        "remove": (
+            "Remove files and put them into the trash.\n"
+            "Files are required and are relative to the CWD."
+        ),
+        "empty": (
+            "Empty the trash.\n"
+            "Files are relative to the trash, "
+            "if none are provided, the entire trash is emptied."
+        ),
+        "restore": (
+            "Restore files from the trash.\n"
+            "Files are required and are relative to the trash."
+        ),
+        "cat": (
+            "Concatenate files from trash to stdout.\n"
+            "Files are required and are relative to the trash."
+        ),
+    }.get(cmd, "")
 
 
 def setup_argparse():
@@ -55,7 +84,7 @@ def setup_argparse():
         "-f",
         "--force",
         action="store_true",
-        help="Ignore non-existent files and always overwrite",
+        help="Ignore non-existent files, always overwrite and don't print errors",
     )
     base.add_argument(
         "-i",
@@ -74,19 +103,12 @@ def setup_argparse():
         "files",
         nargs="*",
         type=Path,
-        help="Files or Directories to operate on."
-        "For list, empty and restore this is relative to the trash directory.",
-    )
-    base.add_argument(
-        "-c",
-        "--color",
-        action="store_true",
-        help="Colorize output",
+        help="Files or Directories to operate on.",
     )
 
     sub = root.add_subparsers(dest="cmd", metavar="CMD", required=True)
     setup_cmd(sub, "list", aliases=["ls"], parents=[base])
-    setup_cmd(sub, "remove", aliases=["rm", "delete", "del"], parents=[base])
+    setup_cmd(sub, "remove", aliases=["rm", "trash"], parents=[base])
     setup_cmd(sub, "empty", aliases=["clean", "void"], parents=[base])
     setup_cmd(sub, "restore", aliases=["rest"], parents=[base])
     setup_cmd(sub, "cat", parents=[base])
