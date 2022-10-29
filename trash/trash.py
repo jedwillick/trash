@@ -1,8 +1,6 @@
 import errno
-import functools
 import os
 import shutil
-import subprocess as sp
 import sys
 from configparser import ConfigParser
 from dataclasses import dataclass
@@ -10,7 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Union
 
-eprint = functools.partial(print, file=sys.stderr)
+
+def ask_yes_no(msg):
+    return input(f"{msg} (y/N): ").lower() == "y"
 
 
 @dataclass
@@ -30,28 +30,23 @@ class Trash:
         self._INFO = (self.trash / "info").expanduser()
         self._FILES.mkdir(parents=True, exist_ok=True)
         self._INFO.mkdir(parents=True, exist_ok=True)
+        self._COMMAND_MAP = {
+            "remove": self.remove_trash,
+            "list": self.list_trash,
+            "empty": self.empty_trash,
+            "restore": self.restore_trash,
+            "cat": self.cat_trash,
+        }
+
+    def bad_command(self, *_):
+        return self.perror("Unknown command")
 
     def run(self, cmd, files):
+        return self._COMMAND_MAP.get(cmd, self.bad_command)(files)
 
-        # Trash relative files
-        files_ = functools.partial(self.relative_files, files)
-
-        if cmd == "remove":
-            return self.remove_trash(files)
-        elif cmd == "list":
-            return self.list_trash(files_(True))
-        elif cmd == "empty":
-            return self.empty_trash(files_(True))
-        elif cmd == "restore":
-            return self.restore_trash(files_(False))
-        elif cmd == "cat":
-            return self.cat_trash(files_(False))
-        else:
-            return self.perror(f"Unknown command {cmd}")
-
-    def relative_files(self, files, fill_empty=False):
+    def relative_files(self, files, fillEmpty=False):
         if not files:
-            return list(self._FILES.iterdir()) if fill_empty else files
+            return list(self._FILES.iterdir()) if fillEmpty else files
 
         # Expand globs relative to self._FILES directory
         rel = []
@@ -66,39 +61,45 @@ class Trash:
         return rel
 
     def list_trash(self, files):
+        files = self.relative_files(files, fillEmpty=True)
         if not files:
             return
         files.sort()
-
-        cmd = ["ls", *files, "-A"]
-        if self.verbose:
-            cmd.append("-l")
-        if files:
-            cmd.append("-d")
-
-        p = sp.run(cmd, capture_output=self.verbose, text=True)
-
-        if not self.verbose or p.returncode != 0:
-            return p.returncode
-
-        for line, file in zip(p.stdout.splitlines(), files):
-            info = self._INFO / f"{file.name}.trashinfo"
-            meta = "missing"
-            if info.exists():
-                config = ConfigParser()
-                config.read(info)
-                meta = config["Trash Info"].get("Path", "missing")
-            print(f"{line} => {meta}")
-
-        return 0
-
-    def prompt(self, msg):
-        return input(f"{msg} (y/N): ").lower() == "y"
-
-    def empty_trash(self, files):
         err = 0
         for file in files:
-            if self.interactive and not self.prompt(f"Delete {file}"):
+            if not file.exists():
+                err += self.perror(f"{file} does not exist")
+                continue
+
+            new = file.name
+            meta = self.read_info(file)
+            if file.is_dir():
+                meta["Path"] += "/"
+                new += "/"
+
+            print(
+                f"{meta['DeletionDate'].replace('T', ' '):<19} {meta['Path']} ==> {new}"
+            )
+        return err
+
+    def read_info(self, file):
+        info = self._INFO / f"{file.name}.trashinfo"
+        config = ConfigParser()
+        config.read(info)
+        keys = ["Path", "DeletionDate"]
+        if "Trash Info" not in config:
+            return {key: "missing" for key in keys}
+        return {key: config["Trash Info"].get(key, "missing") for key in keys}
+
+    def empty_trash(self, files):
+        if not files and not self.force:
+            if not ask_yes_no("Are you sure you want to empty all trash"):
+                return 0
+            files = self.relative_files(files, fillEmpty=True)
+
+        err = 0
+        for file in files:
+            if self.interactive and not ask_yes_no(f"Permanently delete {file}"):
                 continue
             try:
                 if file.is_dir() and self.recursive:
@@ -119,6 +120,8 @@ class Trash:
 
         err = 0
         for file in files:
+            if self.interactive and not ask_yes_no(f"Trash {file}"):
+                continue
             trash, info = self.ensure_unqiue(file.name, file.suffixes)
             is_dir = file.is_dir()
             try:
@@ -140,6 +143,7 @@ class Trash:
     def cat_trash(self, files):
         if not files:
             return self.perror("No files to cat")
+        files = self.relative_files(files)
 
         err = 0
         for file in files:
@@ -168,49 +172,49 @@ class Trash:
     def restore_trash(self, files):
         if not files:
             return self.perror("No files to restore")
+        files = self.relative_files(files)
 
         err = 0
-
         for file in files:
-            info = self._INFO / f"{file.name}.trashinfo"
-            if not info.exists():
-                eprint(f"{info} does not exist")
-                err += 1
+            if not file.exists():
+                err += self.perror(f"{file} does not exist in trash")
                 continue
 
-            config = ConfigParser()
-            config.read(info)
-            dest = config["Trash Info"].get("Path", "missing")
+            if file.is_dir() and not self.recursive:
+                err += self.perror(f"{file}: Is a directory")
+                continue
+
+            dest = self.read_info(file)["Path"]
             if dest == "missing":
-                eprint(f"{info} is missing Path")
-                err += 1
+                err += self.perror(
+                    f"{file}: Missing meta data. Must be manually restored."
+                )
                 continue
             dest = Path(dest)
             if dest.exists():
                 if not self.force and not self.interactive:
-                    eprint(f"{dest} already exists")
-                    err += 1
+                    err += self.perror(f"{dest} already exists")
                     continue
-                if self.interactive and not self.prompt(f"Overwrite {dest}"):
+                if self.interactive and not ask_yes_no(f"Overwrite {dest}"):
                     continue
                 if self.remove_trash([dest]):
                     continue
             shutil.move(file, dest)
             self.vprint(f"Restored {file.name} to {dest}")
-            info.unlink()
+            (self._INFO / f"{file.name}.trashinfo").unlink(missing_ok=True)
         return err
 
     def vprint(self, *args, **kwargs):
         if self.verbose:
             print(*args, **kwargs)
 
-    def perror(self, s, err=None):
+    def perror(self, s: Union[str, Path], err: Union[OSError, None] = None):
         if self.force:
             return 0
         msg = f"trash: {s}"
         if err is not None:
             msg += f": {err.strerror}"
-        eprint(msg)
+        print(msg, file=sys.stderr)
         return 1
 
     def ensure_unqiue(self, name: str, suffixes: List[str], count=2):

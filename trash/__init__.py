@@ -1,3 +1,4 @@
-__version__ = "0.0.6"
+from .trash import Trash
 
-from .trash import Trash  # noqa
+__all__ = ["Trash"]
+__version__ = "0.0.7"
